@@ -58,6 +58,7 @@ var (
 	ErrOverTimeLimit    = errors.New("over the time limit")
 	ErrInvalidMachineID = errors.New("invalid machine id")
 	ErrInvalidSequence  = errors.New("invalid sequence number")
+	ErrInvalidBatchSize = errors.New("invalid batch size")
 )
 
 var defaultInterfaceAddrs = net.InterfaceAddrs
@@ -131,6 +132,78 @@ func (sf *Sonyflake) NextID() (uint64, error) {
 	}
 
 	return sf.toID()
+}
+
+// NextIDBatch generates size contiguous IDs in the sequence space.
+//
+// The batch is allocated atomically: the lock is acquired once and the clock is
+// read once for the whole batch. If size exceeds the remaining sequence slots in
+// the current time unit, the generator advances its logical time to reserve
+// enough slots. The configured time unit is not changed.
+//
+// NextIDBatch returns ErrOverTimeLimit without consuming any IDs if the batch
+// would exceed the time limit.
+func (sf *Sonyflake) NextIDBatch(size int) ([]uint64, error) {
+	if size < 0 {
+		return nil, ErrInvalidBatchSize
+	}
+	if size == 0 {
+		return []uint64{}, nil
+	}
+
+	const (
+		maskSequence = uint64(1<<BitLenSequence - 1)
+		maxTime      = uint64(1 << BitLenTime)
+	)
+
+	sf.mutex.Lock()
+	defer sf.mutex.Unlock()
+
+	current := currentElapsedTime(sf.startTime)
+	elapsed := sf.elapsedTime
+	sequence := uint64(sf.sequence)
+
+	if elapsed < current {
+		elapsed = current
+		sequence = 0
+	} else {
+		sequence++
+		if sequence > maskSequence {
+			elapsed++
+			sequence = 0
+		}
+	}
+
+	lastOffset := uint64(size - 1)
+	lastElapsed := uint64(elapsed) + (sequence+lastOffset)/(maskSequence+1)
+	lastSequence := (sequence + lastOffset) & maskSequence
+	if lastElapsed >= maxTime {
+		return nil, ErrOverTimeLimit
+	}
+
+	ids := make([]uint64, size)
+	for i := range ids {
+		ids[i] = uint64(elapsed)<<(BitLenSequence+BitLenMachineID) |
+			sequence<<BitLenMachineID |
+			uint64(sf.machineID)
+
+		sequence++
+		if sequence > maskSequence {
+			elapsed++
+			sequence = 0
+		}
+	}
+
+	// Keep the last allocated slot as the current state so the next NextID
+	// continues directly after the batch.
+	sf.elapsedTime = int64(lastElapsed)
+	sf.sequence = uint16(lastSequence)
+	return ids, nil
+}
+
+// NextIDs is an alias for NextIDBatch.
+func (sf *Sonyflake) NextIDs(size int) ([]uint64, error) {
+	return sf.NextIDBatch(size)
 }
 
 const sonyflakeTimeUnit = 1e7 // nsec, i.e. 10 msec

@@ -204,6 +204,179 @@ func TestSonyflakeInParallel(t *testing.T) {
 	fmt.Println("number of id:", len(set))
 }
 
+func newBatchAllocationTestSonyflake(t *testing.T, machineID uint16, start time.Time) *Sonyflake {
+	t.Helper()
+	sonyflake, err := New(Settings{
+		StartTime: start,
+		MachineID: func() (uint16, error) {
+			return machineID, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sonyflake
+}
+
+func TestNextIDBatchAllocation(t *testing.T) {
+	const size = 1000
+	const machineID = 42
+
+	sf := newBatchAllocationTestSonyflake(t, machineID, time.Now().Add(-time.Second))
+	ids, err := sf.NextIDBatch(size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != size {
+		t.Fatalf("unexpected batch size: got %d, want %d", len(ids), size)
+	}
+
+	seen := make(map[uint64]struct{}, size)
+	expectedTime := int64(ElapsedTime(ids[0]) / sonyflakeTimeUnit)
+	expectedSequence := uint64(0)
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			t.Fatalf("duplicated id: %d", id)
+		}
+		seen[id] = struct{}{}
+
+		if MachineID(id) != machineID {
+			t.Errorf("unexpected machine id: %d", MachineID(id))
+		}
+		if int64(ElapsedTime(id)/sonyflakeTimeUnit) != expectedTime {
+			t.Errorf("unexpected time part: %d, want %d", ElapsedTime(id)/sonyflakeTimeUnit, expectedTime)
+		}
+		if SequenceNumber(id) != expectedSequence {
+			t.Errorf("unexpected sequence: %d, want %d", SequenceNumber(id), expectedSequence)
+		}
+
+		expectedSequence++
+		if expectedSequence == 1<<BitLenSequence {
+			expectedSequence = 0
+			expectedTime++
+		}
+	}
+
+	next, err := sf.NextID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := seen[next]; ok {
+		t.Fatalf("NextID collided with batch: %d", next)
+	}
+	if SequenceNumber(next) != expectedSequence || int64(ElapsedTime(next)/sonyflakeTimeUnit) != expectedTime {
+		t.Fatalf("NextID did not continue after batch: got time=%d sequence=%d, want time=%d sequence=%d",
+			ElapsedTime(next)/sonyflakeTimeUnit, SequenceNumber(next), expectedTime, expectedSequence)
+	}
+
+	aliasIDs, err := sf.NextIDs(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aliasIDs) != 2 || aliasIDs[0] == aliasIDs[1] {
+		t.Fatalf("unexpected NextIDs result: %v", aliasIDs)
+	}
+}
+
+func TestNextIDBatchAllocationInvalidSize(t *testing.T) {
+	sf := newBatchAllocationTestSonyflake(t, 1, time.Now().Add(-time.Second))
+
+	ids, err := sf.NextIDBatch(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("unexpected ids: %v", ids)
+	}
+
+	if _, err := sf.NextIDBatch(-1); !errors.Is(err, ErrInvalidBatchSize) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNextIDBatchAllocationOverTimeLimit(t *testing.T) {
+	sf := newBatchAllocationTestSonyflake(t, 1, time.Now().Add(-time.Second))
+	sf.elapsedTime = 1<<BitLenTime - 1
+	sf.sequence = 1<<BitLenSequence - 1
+
+	elapsedTime, sequence := sf.elapsedTime, sf.sequence
+	if _, err := sf.NextIDBatch(1); !errors.Is(err, ErrOverTimeLimit) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.elapsedTime != elapsedTime || sf.sequence != sequence {
+		t.Fatal("failed batch consumed sequence state")
+	}
+}
+
+func TestNextIDBatchAllocationAcrossInstances(t *testing.T) {
+	start := time.Now().Add(-time.Second)
+	sf1 := newBatchAllocationTestSonyflake(t, 1, start)
+	sf2 := newBatchAllocationTestSonyflake(t, 2, start)
+
+	ids1, err := sf1.NextIDBatch(5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids2, err := sf2.NextIDBatch(5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := make(map[uint64]struct{}, len(ids1)+len(ids2))
+	for _, ids := range [][]uint64{ids1, ids2} {
+		for _, id := range ids {
+			if _, ok := seen[id]; ok {
+				t.Fatalf("duplicated id across instances: %d", id)
+			}
+			seen[id] = struct{}{}
+		}
+	}
+}
+
+func TestNextIDBatchAllocationInParallel(t *testing.T) {
+	const (
+		numWorkers = 100
+		batchSize  = 1000
+	)
+
+	sf := newBatchAllocationTestSonyflake(t, 1, time.Now().Add(-time.Second))
+	results := make(chan []uint64, numWorkers)
+	errors := make(chan error, numWorkers)
+
+	start := time.Now()
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			ids, err := sf.NextIDBatch(batchSize)
+			if err != nil {
+				errors <- err
+				return
+			}
+			results <- ids
+		}()
+	}
+
+	seen := make(map[uint64]struct{}, numWorkers*batchSize)
+	for i := 0; i < numWorkers; i++ {
+		select {
+		case err := <-errors:
+			t.Fatal(err)
+		case ids := <-results:
+			for _, id := range ids {
+				if _, ok := seen[id]; ok {
+					t.Fatalf("duplicated id: %d", id)
+				}
+				seen[id] = struct{}{}
+			}
+		}
+	}
+	elapsed := time.Since(start)
+
+	if len(seen) != numWorkers*batchSize {
+		t.Fatalf("unexpected number of ids: got %d, want %d", len(seen), numWorkers*batchSize)
+	}
+	t.Logf("generated %d ids in %v (%.0f ids/s)", len(seen), elapsed, float64(len(seen))/elapsed.Seconds())
+}
+
 func pseudoSleep(period time.Duration) {
 	sf.startTime -= int64(period) / sonyflakeTimeUnit
 }

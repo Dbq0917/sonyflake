@@ -88,6 +88,19 @@ func (sf *Sonyflake) NextID() (int64, error)
 NextID can continue to generate IDs for about 174 years from StartTime by default.
 But after the Sonyflake time is over the limit, NextID returns an error.
 
+For bulk generation, use NextIDBatch (NextIDs is an alias):
+
+```go
+func (sf *Sonyflake) NextIDBatch(size int) ([]int64, error)
+```
+
+NextIDBatch acquires the lock and reads the clock once for the whole batch.
+It reserves consecutive sequence slots atomically, advancing the generator's
+logical time as needed without changing TimeUnit. Therefore, when a burst uses
+more slots than fit in one time unit, IDs may temporarily carry timestamps
+later than the wall clock. Different processes must still use different machine
+IDs as described above.
+
 ## AWS VPC and Docker
 
 The [awsutil](https://github.com/sony/sonyflake/blob/master/v2/awsutil) package provides
