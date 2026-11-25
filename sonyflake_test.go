@@ -220,6 +220,53 @@ func TestNextIDError(t *testing.T) {
 	}
 }
 
+func TestNextIDClockBackward(t *testing.T) {
+	sf, err := New(Settings{StartTime: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := make(map[uint64]struct{})
+	uniqueNextID := func() {
+		t.Helper()
+		id, err := sf.NextID()
+		if err != nil {
+			t.Fatalf("id not generated: %v", err)
+		}
+		if _, ok := seen[id]; ok {
+			t.Fatalf("duplicated id: %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+
+	uniqueNextID()
+
+	// Move the clock backwards by 10 minutes.
+	sf.startTime += int64(10*time.Minute) / sonyflakeTimeUnit
+
+	// IDs are still issued from the remembered time
+	// until the sequence number is exhausted.
+	for i := 0; i < 1<<BitLenSequence-1; i++ {
+		uniqueNextID()
+	}
+
+	// When the sequence number overflows while the clock is behind,
+	// NextID must fail fast instead of sleeping while holding the lock.
+	done := make(chan error, 1)
+	go func() {
+		_, err := sf.NextID()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrClockBackward) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("NextID did not return promptly after the clock moved backwards")
+	}
+}
+
 func TestPrivateIPv4(t *testing.T) {
 	testCases := []struct {
 		description    string

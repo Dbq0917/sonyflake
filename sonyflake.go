@@ -58,6 +58,7 @@ var (
 	ErrOverTimeLimit    = errors.New("over the time limit")
 	ErrInvalidMachineID = errors.New("invalid machine id")
 	ErrInvalidSequence  = errors.New("invalid sequence number")
+	ErrClockBackward    = errors.New("clock moved backwards")
 )
 
 var defaultInterfaceAddrs = net.InterfaceAddrs
@@ -111,6 +112,9 @@ func NewSonyflake(st Settings) *Sonyflake {
 
 // NextID generates a next unique ID.
 // After the Sonyflake time overflows, NextID returns an error.
+// If the clock moves backwards and the sequence number overflows
+// before the clock catches up, NextID returns ErrClockBackward
+// instead of sleeping while holding the lock.
 func (sf *Sonyflake) NextID() (uint64, error) {
 	const maskSequence = uint16(1<<BitLenSequence - 1)
 
@@ -126,6 +130,9 @@ func (sf *Sonyflake) NextID() (uint64, error) {
 		if sf.sequence == 0 {
 			sf.elapsedTime++
 			overtime := sf.elapsedTime - current
+			if overtime > 1 {
+				return 0, ErrClockBackward
+			}
 			time.Sleep(sleepTime((overtime)))
 		}
 	}

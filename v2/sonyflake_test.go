@@ -272,6 +272,58 @@ func TestNextID_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestNextID_ClockBackward(t *testing.T) {
+	start := time.Now()
+	sf := newSonyflake(t, Settings{
+		TimeUnit:  time.Millisecond,
+		StartTime: start,
+	})
+
+	now := start
+	sf.now = func() time.Time { return now }
+
+	seen := make(map[int64]struct{})
+	uniqueNextID := func() {
+		t.Helper()
+		id := nextID(t, sf)
+		if _, ok := seen[id]; ok {
+			t.Fatalf("duplicated id: %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+
+	uniqueNextID()
+
+	// Move the clock backwards by 10 minutes.
+	now = now.Add(-10 * time.Minute)
+
+	// IDs are still issued from the remembered time
+	// until the sequence number is exhausted.
+	for i := 0; i < 1<<sf.bitsSequence-1; i++ {
+		uniqueNextID()
+	}
+
+	// When the sequence number overflows while the clock is behind,
+	// NextID must fail fast instead of sleeping while holding the lock.
+	done := make(chan error, 1)
+	go func() {
+		_, err := sf.NextID()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrClockBackward) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("NextID did not return promptly after the clock moved backwards")
+	}
+
+	// Once the clock catches up, IDs are issued again.
+	now = start.Add(time.Minute)
+	uniqueNextID()
+}
+
 func TestPrivateIPv4(t *testing.T) {
 	testCases := []struct {
 		description    string
