@@ -28,7 +28,7 @@ func init() {
 
 	startTime = toSonyflakeTime(st.StartTime)
 
-	ip, _ := lower16BitPrivateIP(defaultInterfaceAddrs)
+	ip, _ := defaultMachineID(defaultInterfaceAddrs)
 	machineID = uint64(ip)
 }
 
@@ -267,29 +267,26 @@ func TestPrivateIPv4(t *testing.T) {
 	}
 }
 
-func TestLower16BitPrivateIP(t *testing.T) {
+func TestDefaultMachineID(t *testing.T) {
 	testCases := []struct {
 		description    string
-		expected       uint16
 		interfaceAddrs types.InterfaceAddrs
 		error          string
 	}{
 		{
 			description:    "InterfaceAddrs returns an empty or nil list",
-			expected:       0,
 			interfaceAddrs: mock.NewNilInterfaceAddrs(),
 			error:          "no private ip address",
 		},
 		{
 			description:    "InterfaceAddrs returns one or more IPs",
-			expected:       1,
 			interfaceAddrs: mock.NewSuccessfulInterfaceAddrs(),
 			error:          "",
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			actual, err := lower16BitPrivateIP(tc.interfaceAddrs)
+			actual, err := defaultMachineID(tc.interfaceAddrs)
 
 			if (err != nil) && (tc.error == "") {
 				t.Errorf("expected no error, but got: %s", err)
@@ -298,10 +295,8 @@ func TestLower16BitPrivateIP(t *testing.T) {
 				return
 			}
 
-			if actual == tc.expected {
-				return
-			} else {
-				t.Errorf("error: expected: %v, but got: %v", tc.expected, actual)
+			if err == nil && uint64(actual) >= 1<<BitLenMachineID {
+				t.Errorf("machine id %d exceeds %d bits", actual, BitLenMachineID)
 			}
 		})
 	}

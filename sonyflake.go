@@ -9,7 +9,9 @@ package sonyflake
 
 import (
 	"errors"
+	"hash/fnv"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,7 +34,13 @@ const (
 // MachineID returns the unique ID of the Sonyflake instance.
 // If MachineID returns an error, Sonyflake is not created.
 // If MachineID is nil, default MachineID is used.
-// Default MachineID returns the lower 16 bits of the private IP address.
+// Default MachineID derives a stable 16-bit identifier from the private IP
+// addresses of the host: the addresses are collected, sorted and
+// deduplicated, and the smallest one is used. The result therefore does not
+// depend on the interface enumeration order and does not change when a network
+// interface is added or reordered. The derivation is deterministic, so the
+// machine id can be verified on the host and no manual per-machine
+// configuration is required.
 //
 // CheckMachineID validates the uniqueness of the machine ID.
 // If CheckMachineID returns false, Sonyflake is not created.
@@ -84,7 +92,7 @@ func New(st Settings) (*Sonyflake, error) {
 
 	var err error
 	if st.MachineID == nil {
-		sf.machineID, err = lower16BitPrivateIP(defaultInterfaceAddrs)
+		sf.machineID, err = defaultMachineID(defaultInterfaceAddrs)
 	} else {
 		sf.machineID, err = st.MachineID()
 	}
@@ -159,11 +167,21 @@ func (sf *Sonyflake) toID() (uint64, error) {
 }
 
 func privateIPv4(interfaceAddrs types.InterfaceAddrs) (net.IP, error) {
+	ips, err := privateIPv4s(interfaceAddrs)
+	if err != nil {
+		return nil, err
+	}
+	return ips[0], nil
+}
+
+func privateIPv4s(interfaceAddrs types.InterfaceAddrs) ([]net.IP, error) {
 	as, err := interfaceAddrs()
 	if err != nil {
 		return nil, err
 	}
 
+	seen := make(map[string]struct{})
+	var ips []net.IP
 	for _, a := range as {
 		ipnet, ok := a.(*net.IPNet)
 		if !ok || ipnet.IP.IsLoopback() {
@@ -172,10 +190,22 @@ func privateIPv4(interfaceAddrs types.InterfaceAddrs) (net.IP, error) {
 
 		ip := ipnet.IP.To4()
 		if isPrivateIPv4(ip) {
-			return ip, nil
+			key := ip.String()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			ips = append(ips, ip)
 		}
 	}
-	return nil, ErrNoPrivateAddress
+	if len(ips) == 0 {
+		return nil, ErrNoPrivateAddress
+	}
+
+	sort.Slice(ips, func(i, j int) bool {
+		return ips[i].String() < ips[j].String()
+	})
+	return ips, nil
 }
 
 func isPrivateIPv4(ip net.IP) bool {
@@ -184,13 +214,23 @@ func isPrivateIPv4(ip net.IP) bool {
 		(ip[0] == 10 || ip[0] == 172 && (ip[1] >= 16 && ip[1] < 32) || ip[0] == 192 && ip[1] == 168 || ip[0] == 169 && ip[1] == 254)
 }
 
-func lower16BitPrivateIP(interfaceAddrs types.InterfaceAddrs) (uint16, error) {
+// defaultMachineID derives a stable machine id from the private IP addresses
+// of the host. The smallest private address is selected deterministically
+// (the full address set is sorted and deduplicated first) and hashed with
+// FNV-1a; the lower BitLenMachineID bits of the hash are used. Picking a
+// single canonical address makes the result reproducible across restarts,
+// immune to the order in which the operating system enumerates network
+// interfaces, and unaffected by additional interfaces whose addresses are
+// larger than the canonical one.
+func defaultMachineID(interfaceAddrs types.InterfaceAddrs) (uint16, error) {
 	ip, err := privateIPv4(interfaceAddrs)
 	if err != nil {
 		return 0, err
 	}
 
-	return uint16(ip[2])<<8 + uint16(ip[3]), nil
+	h := fnv.New32a()
+	h.Write(ip)
+	return uint16(h.Sum32() & (1<<BitLenMachineID - 1)), nil
 }
 
 // ElapsedTime returns the elapsed time when the given Sonyflake ID was generated.

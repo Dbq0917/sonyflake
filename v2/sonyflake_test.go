@@ -128,12 +128,12 @@ func nextID(t *testing.T, sf *Sonyflake) int64 {
 	return id
 }
 
-func defaultMachineID(t *testing.T) int {
-	ip, err := lower16BitPrivateIP(defaultInterfaceAddrs)
+func defaultMachineIDFromHost(t *testing.T) int {
+	id, err := defaultMachineID(defaultInterfaceAddrs, defaultBitsMachine)
 	if err != nil {
-		t.Fatalf("failed to get private ip address: %v", err)
+		t.Fatalf("failed to get machine id: %v", err)
 	}
-	return ip
+	return id
 }
 
 func TestNextID(t *testing.T) {
@@ -156,7 +156,7 @@ func TestNextID(t *testing.T) {
 	}
 
 	actualMachine := sf.machinePart(id)
-	if actualMachine != int64(defaultMachineID(t)) {
+	if actualMachine != int64(defaultMachineIDFromHost(t)) {
 		t.Errorf("unexpected machine: %d", actualMachine)
 	}
 
@@ -171,7 +171,7 @@ func TestNextID_InSequence(t *testing.T) {
 		StartTime: start,
 	})
 	startTime := sf.toInternalTime(start)
-	machineID := int64(defaultMachineID(t))
+	machineID := int64(defaultMachineIDFromHost(t))
 
 	var numID int
 	var lastID int64
@@ -314,42 +314,38 @@ func TestPrivateIPv4(t *testing.T) {
 	}
 }
 
-func TestLower16BitPrivateIP(t *testing.T) {
+func TestDefaultMachineID(t *testing.T) {
 	testCases := []struct {
 		description    string
-		expected       int
 		interfaceAddrs types.InterfaceAddrs
 		error          error
 	}{
 		{
 			description:    "returns an error",
-			expected:       0,
 			interfaceAddrs: mock.NewFailingInterfaceAddrs(),
 			error:          mock.ErrFailedToGetAddresses,
 		},
 		{
 			description:    "empty address list",
-			expected:       0,
 			interfaceAddrs: mock.NewNilInterfaceAddrs(),
 			error:          ErrNoPrivateAddress,
 		},
 		{
 			description:    "success",
-			expected:       1,
 			interfaceAddrs: mock.NewSuccessfulInterfaceAddrs(),
 			error:          nil,
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			actual, err := lower16BitPrivateIP(tc.interfaceAddrs)
+			actual, err := defaultMachineID(tc.interfaceAddrs, defaultBitsMachine)
 
 			if !errors.Is(err, tc.error) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if actual != tc.expected {
-				t.Errorf("unexpected ip: %d", actual)
+			if err == nil && (actual < 0 || actual >= 1<<defaultBitsMachine) {
+				t.Errorf("machine id %d out of range for %d bits", actual, defaultBitsMachine)
 			}
 		})
 	}

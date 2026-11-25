@@ -70,7 +70,12 @@ type Settings struct {
 
 - MachineID returns the unique ID of a Sonyflake instance.
   If MachineID returns an error, the instance will not be created.
-  If MachineID is nil, the default MachineID is used, which returns the lower 16 bits of the private IP address.
+  If MachineID is nil, the default MachineID is used. It collects the private
+  IP addresses of the host, sorts and deduplicates them, selects the smallest
+  one deterministically, and hashes it (FNV-1a) into the machine id bit width.
+  The result is stable across restarts even when network interfaces are added,
+  removed or enumerated in a different order, and it can be verified
+  deterministically on the host without any manual per-machine configuration.
 
 - CheckMachineID validates the uniqueness of a machine ID.
   If CheckMachineID returns false, the instance will not be created.

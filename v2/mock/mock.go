@@ -34,3 +34,16 @@ func NewNilInterfaceAddrs() types.InterfaceAddrs {
 		return []net.Addr{}, nil
 	}
 }
+
+// NewMultipleInterfaceAddrs returns the given private IP addresses in order.
+// It is useful for simulating hosts with several network interfaces.
+func NewMultipleInterfaceAddrs(ips ...net.IP) types.InterfaceAddrs {
+	ifat := make([]net.Addr, 0, len(ips))
+	for _, ip := range ips {
+		ifat = append(ifat, &net.IPNet{IP: ip, Mask: []byte{255, 0, 0, 0}})
+	}
+
+	return func() ([]net.Addr, error) {
+		return ifat, nil
+	}
+}
